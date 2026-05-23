@@ -154,7 +154,7 @@ l'application essaie de migrer automatiquement les comptes, sessions et coffres 
   - voir la liste de ses coffres ;
   - créer un nouveau coffre ;
   - ouvrir uniquement un coffre de sa propre liste.
-- Gestion des fichiers dans le coffre ouvert : ajout, extraction, suppression, téléchargement simple ou multiple.
+- Gestion des fichiers dans le coffre ouvert : ajout depuis le navigateur client, extraction par téléchargement côté client, suppression, téléchargement simple ou multiple.
 
 ## Mot de passe utilisateur et mot de passe du coffre
 
@@ -165,17 +165,27 @@ Il y a deux niveaux :
 
 Tu peux utiliser le même mot de passe pour les deux pendant tes tests, mais pour une vraie utilisation il est préférable de les distinguer.
 
-## Sélecteur système
+## Ajout de fichiers côté client
 
-Le bouton **Sélectionner** appelle Python côté serveur pour ouvrir le sélecteur de fichiers/dossiers de l'OS.
+Le bouton **Sélectionner fichier(s)** utilise maintenant le sélecteur de fichiers du navigateur :
 
-Sous Ubuntu/Debian, l'application utilise `zenity`, `kdialog` ou `yad` s'ils sont disponibles. Si aucun sélecteur n'est installé :
-
-```bash
-sudo apt install zenity
+```html
+<input type="file" multiple>
 ```
 
-Le code Python ne dépend pas de Tkinter ni de PyQt.
+Cela signifie que la fenêtre ouvre les fichiers de l'ordinateur du **client**, puis les fichiers sont envoyés au serveur et chiffrés dans le coffre.
+
+Conséquence normale d'une application web : le navigateur ne transmet pas le vrai chemin local du fichier et ne permet pas de supprimer automatiquement l'original sur l'ordinateur du client.
+
+Le code ne dépend pas de Tkinter, PyQt, Zenity, KDialog ou Yad.
+
+
+## Extraction côté client
+
+La fonctionnalité **Extraire un fichier** ne demande plus de dossier de destination serveur.
+L'utilisateur choisit un fichier dans le coffre, puis le navigateur télécharge le fichier déchiffré sur l'ordinateur du **client**.
+
+L'option **Supprimer du coffre après l’extraction** reste disponible : le serveur prépare le téléchargement, puis supprime la version chiffrée du coffre si l'option est cochée.
 
 ## Compatibilité des coffres
 

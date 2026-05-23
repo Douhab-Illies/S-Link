@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import io
-import json
+from email.parser import BytesParser
+from email.policy import default as email_policy
 import mimetypes
 import zipfile
 from http import cookies
@@ -11,7 +12,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from app_state import STATE, UserSession
 from config import SESSION_COOKIE_NAME
-from path_selector import select_path
 from vault_core import VaultCore, clean_archive_name
 from views import index_body, login_body, page
 
@@ -58,14 +58,6 @@ class VaultHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
     def redirect_home(self) -> None:
         self.send_response(303)
         self.send_header("Location", "/")
@@ -106,9 +98,6 @@ class VaultHandler(BaseHTTPRequestHandler):
             self.handle_download(parsed.query)
             return
 
-        if parsed.path == "/select-path":
-            self.handle_select_path(parsed.query)
-            return
 
         self.send_response(404)
         self.end_headers()
@@ -116,6 +105,11 @@ class VaultHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/upload-files":
+            self.handle_upload_files()
+            return
+
         form = self.read_form()
 
         if parsed.path == "/login":
@@ -132,6 +126,10 @@ class VaultHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/download-selected":
             self.handle_download_selected(form.get("names", []))
+            return
+
+        if parsed.path == "/extract-download":
+            self.handle_extract_download(form)
             return
 
         with STATE.lock:
@@ -170,26 +168,6 @@ class VaultHandler(BaseHTTPRequestHandler):
                 elif parsed.path == "/close-vault":
                     session.close_vault()
                     session.set_message("Coffre fermé. Tu es revenu à ta liste de coffres.")
-
-                elif parsed.path == "/add-path":
-                    move = first_value(form, "move_after_add") == "1"
-                    count = session.vault.add_path(first_value(form, "source_path"), move)
-                    msg = f"{count} fichier(s) ajouté(s) au coffre."
-                    if move:
-                        msg += " Original supprimé de manière classique, pas par effacement sécurisé."
-                    session.set_message(msg)
-
-                elif parsed.path == "/extract":
-                    delete_after_extract = first_value(form, "delete_after_extract") == "1"
-                    output = session.vault.extract(
-                        first_value(form, "name"),
-                        first_value(form, "destination"),
-                        delete_after_extract=delete_after_extract,
-                    )
-                    msg = f"Fichier extrait : {output}"
-                    if delete_after_extract:
-                        msg += " Le fichier a aussi été supprimé du coffre."
-                    session.set_message(msg)
 
                 elif parsed.path == "/delete":
                     session.vault.delete(first_value(form, "name"))
@@ -248,20 +226,119 @@ class VaultHandler(BaseHTTPRequestHandler):
             STATE.delete_session(token)
         self.redirect_and_clear_cookie()
 
-    def handle_select_path(self, query: str) -> None:
-        with STATE.lock:
-            if not self.current_session():
-                self.send_json({"ok": False, "error": "Connecte-toi d’abord."}, status=401)
-                return
-
-        params = parse_qs(query)
-        mode = params.get("mode", ["file"])[0]
+    def read_uploaded_files(self) -> list[tuple[str, bytes]]:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data"):
+            raise ValueError("Formulaire d’envoi invalide.")
 
         try:
-            selected = select_path(mode)
-            self.send_json({"ok": True, "path": selected})
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Taille d’envoi invalide.") from exc
+
+        if length <= 0:
+            return []
+
+        body = self.rfile.read(length)
+
+        # Le module email sait parser un message multipart complet.
+        # On préfixe donc le corps HTTP avec les en-têtes MIME nécessaires.
+        mime_message = (
+            f"Content-Type: {content_type}\r\n"
+            "MIME-Version: 1.0\r\n"
+            "\r\n"
+        ).encode("utf-8") + body
+
+        message = BytesParser(policy=email_policy).parsebytes(mime_message)
+        if not message.is_multipart():
+            raise ValueError("Aucun fichier reçu.")
+
+        files: list[tuple[str, bytes]] = []
+        for part in message.iter_parts():
+            disposition = part.get_content_disposition()
+            field_name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+
+            if disposition != "form-data" or field_name != "files" or not filename:
+                continue
+
+            data = part.get_payload(decode=True)
+            files.append((filename, data or b""))
+
+        return files
+
+    def handle_upload_files(self) -> None:
+        with STATE.lock:
+            session = self.current_session()
+            if not session:
+                self.send_html(error="Connecte-toi d’abord.", status=401)
+                return
+
+            if not session.vault.is_open:
+                session.set_message("", "Ouvre un coffre avant d’ajouter des fichiers.")
+                self.redirect_home()
+                return
+
+        try:
+            files = self.read_uploaded_files()
         except Exception as exc:
-            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            with STATE.lock:
+                session = self.current_session()
+                if session:
+                    session.set_message("", str(exc))
+            self.redirect_home()
+            return
+
+        with STATE.lock:
+            session = self.current_session()
+            if not session:
+                self.send_html(error="Connecte-toi d’abord.", status=401)
+                return
+
+            try:
+                count = session.vault.add_uploaded_files(files)
+                session.set_message(f"{count} fichier(s) importé(s) depuis le navigateur. Les originaux restent sur l’ordinateur du client.")
+            except Exception as exc:
+                session.set_message("", str(exc))
+
+        self.redirect_home()
+
+    def handle_extract_download(self, form: dict[str, list[str]]) -> None:
+        name = first_value(form, "name")
+        delete_after_extract = first_value(form, "delete_after_extract") == "1"
+
+        with STATE.lock:
+            session = self.current_session()
+            if not session:
+                self.send_html(error="Connecte-toi d’abord.", status=401)
+                return
+
+            if not session.vault.is_open:
+                session.set_message("", "Ouvre un coffre avant d’extraire un fichier.")
+                self.redirect_home()
+                return
+
+            try:
+                filename, data = session.vault.get_file_bytes(name)
+                if delete_after_extract:
+                    session.vault.delete(name)
+                    session.set_message("Fichier téléchargé sur le client et supprimé du coffre.")
+                else:
+                    session.set_message("Fichier téléchargé sur le client.")
+            except Exception as exc:
+                session.set_message("", str(exc))
+                self.redirect_home()
+                return
+
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        safe_filename = Path(filename).name.replace('"', "")
+
+        self.send_response(200)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{safe_filename}"')
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_download(self, query: str) -> None:
         params = parse_qs(query)

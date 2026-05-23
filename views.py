@@ -155,6 +155,23 @@ def page(title: str, body: str, session: UserSession | None = None, message: str
     .toolbar {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
     .field-actions {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
     .field-actions button {{ margin-top: 8px; }}
+    .hidden-file-input {{ display: none; }}
+    .file-picker-row {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 8px;
+    }}
+    .file-selection-label {{
+      display: inline-block;
+      max-width: 100%;
+      padding: 8px 10px;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      background: #fbfdff;
+      color: var(--muted);
+    }}
     .vault-list {{ display: grid; gap: 12px; }}
     .vault-item {{
       border: 1px solid var(--border);
@@ -176,24 +193,28 @@ def page(title: str, body: str, session: UserSession | None = None, message: str
     {body}
   </main>
   <script>
-    async function selectPath(inputId, mode) {{
-      const input = document.getElementById(inputId);
-      if (!input) return;
+    function triggerClientFilePicker() {{
+      const input = document.getElementById('client-files');
+      if (input) input.click();
+    }}
 
-      try {{
-        const response = await fetch(`/select-path?mode=${{encodeURIComponent(mode)}}`);
-        const data = await response.json();
+    function updateUploadFileLabel() {{
+      const input = document.getElementById('client-files');
+      const label = document.getElementById('upload-file-label');
+      if (!input || !label) return;
 
-        if (!response.ok || !data.ok) {{
-          alert(data.error || "Sélection impossible.");
-          return;
-        }}
-
-        input.value = data.path;
-        input.focus();
-      }} catch (error) {{
-        alert("Erreur pendant la sélection : " + error);
+      const files = Array.from(input.files || []);
+      if (files.length === 0) {{
+        label.textContent = 'Aucun fichier sélectionné';
+        return;
       }}
+
+      if (files.length === 1) {{
+        label.textContent = files[0].name;
+        return;
+      }}
+
+      label.textContent = `${{files.length}} fichiers sélectionnés`;
     }}
 
     function selectedFileNames() {{
@@ -368,43 +389,35 @@ def open_vault_tools(session: UserSession) -> str:
 
 <div class="grid">
   <section class="card">
-    <h2>Ajouter par chemin local</h2>
-    <form method="post" action="/add-path">
-      <label>Chemin local à ajouter</label>
-      <input id="source-path" type="text" name="source_path" placeholder="/home/illies/Documents/fichier.pdf" required>
-      <div class="field-actions">
-        <button class="secondary" type="button" onclick="selectPath('source-path', 'file')">Sélectionner un fichier</button>
-        <button class="secondary" type="button" onclick="selectPath('source-path', 'directory')">Sélectionner un dossier</button>
+    <h2>Ajouter des fichiers depuis cet ordinateur</h2>
+    <form method="post" action="/upload-files" enctype="multipart/form-data">
+      <label>Fichier(s) à envoyer dans le coffre</label>
+      <input id="client-files" class="hidden-file-input" type="file" name="files" multiple required onchange="updateUploadFileLabel()">
+      <div class="file-picker-row">
+        <button class="secondary" type="button" onclick="triggerClientFilePicker()">Sélectionner fichier(s)</button>
+        <span id="upload-file-label" class="file-selection-label">Aucun fichier sélectionné</span>
       </div>
-      <label>
-        <input type="checkbox" name="move_after_add" value="1">
-        Supprimer l’original après ajout
-      </label>
       <button type="submit">Ajouter au coffre</button>
     </form>
-    <p class="muted small">Le bouton remplit seulement le champ. L’ajout se fait quand tu cliques sur “Ajouter au coffre”.</p>
+    <p class="muted small">La fenêtre de sélection s’ouvre côté client, dans le navigateur. Le fichier est ensuite envoyé au serveur puis chiffré dans le coffre.</p>
+    <p class="muted small">Le navigateur ne donne pas le vrai chemin local et ne permet pas de supprimer l’original sur l’ordinateur du client.</p>
   </section>
 
   <section class="card">
     <h2>Extraire un fichier</h2>
-    <form method="post" action="/extract">
+    <form method="post" action="/extract-download">
       <label>Fichier du coffre</label>
       <select id="extract-select" name="name" required{disabled_if_empty}>
         {options}
       </select>
       {empty_note}
-      <label>Dossier de destination</label>
-      <input id="destination-path" type="text" name="destination" placeholder="/home/illies/Documents/sortie" required>
-      <div class="field-actions">
-        <button class="secondary" type="button" onclick="selectPath('destination-path', 'directory')">Sélectionner</button>
-      </div>
       <label>
         <input type="checkbox" name="delete_after_extract" value="1">
         Supprimer du coffre après l’extraction
       </label>
-      <button type="submit"{disabled_if_empty}>Extraire</button>
+      <button type="submit"{disabled_if_empty}>Extraire et télécharger</button>
     </form>
-    <p class="muted small">Pour télécharger plusieurs fichiers, utilise les cases à cocher dans le tableau.</p>
+    <p class="muted small">Le fichier déchiffré est téléchargé par le navigateur sur l’ordinateur du client. Aucun chemin serveur n’est demandé.</p>
   </section>
 
   <section class="card">

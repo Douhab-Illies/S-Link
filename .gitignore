@@ -1,0 +1,6 @@
+.secure_vault_app
+.pybuilder/
+__pypackages__/
+__pycache__/
+.env
+.venv
